@@ -1,62 +1,308 @@
 #!/usr/bin/env python
 
 import argparse
-import os
+import configparser
+import decimal
+import inspect
+import pandas
 import sys
-from typing import NamedTuple, Optional, TypeVar
+
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Optional
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('paths', nargs='*', help='paths to process')
+    parser.add_argument('paystubs', nargs='*', help='paystubs to process (either xlsx or config')
+    parser.add_argument('--config', default="employee.config", help='config file containing employee information')
     parser.add_argument('--verbose', default=False, action='store_true', help='show more detailed messages')
     return parser.parse_args()
+
+
+def main():
+    for path in ARGS.paystubs:
+        ARGS._config = read_config(ARGS.config)['general']
+        if path.endswith('.xlsx'):
+            xlsx = read_excel(path)
+            paystub = normalize_xlsx(xlsx)
+        else:
+            paystub_config = read_config(path)
+            paystub = normalize_paystub_config(paystub_config)
+
+        print(paystub)
+        analysis = analyze(paystub)
+        print()
+        print_analysis(analysis)
+        print()
+        print_checks(analysis)
+
+
+def D(arg):
+    return decimal.Decimal(arg).quantize(decimal.Decimal('.01'))
+
+
+def as_D(func):
+    def wrap(*args, **kwargs):
+        return D(func(*args, **kwargs))
+    return wrap
+
+
+def cfg(key, cast=D):
+    try:
+        return cast(ARGS._config[key])
+    except KeyError:
+        raise Fail(f"config file [{ARGS.config}] missing required value for '{key}'")
+
+
+def dd(*args, **kwargs):
+    "Print debug information including function name and line number."
+    if ARGS.verbose:
+        caller = inspect.stack()[1]
+        print(f'<{caller.function}:{caller.lineno}>', *args, **kwargs)
 
 
 class Fail(Exception):
     pass
 
 
-def scantree(path, follow_symlinks=False, recursive=True):
-    passthru = [follow_symlinks, recursive]
-    for entry in os.scandir(path):
-        if entry.is_dir(follow_symlinks=follow_symlinks) and recursive:
-            yield from scantree(entry.path, *passthru)
-        else:
-            yield entry
+@dataclass
+class Paystub:
+    paystub_date: Optional[datetime.date] = None
+
+    cur_base_wages: D = D(0)
+    ytd_base_wages: D = D(0)
+    ytd_apb_bonus: D = D(0)
+    ytd_qpb_bonus: D = D(0)
+
+    cur_pretax_regular: D = D(0)
+    cur_aftertax_regular: D = D(0)
+
+    ytd_pretax_regular: D = D(0)
+    ytd_pretax_bonus: D = D(0)
+    ytd_pretax_employer_match: D = D(0)
+    ytd_pretax_employer_apb_match: D = D(0)
+
+    ytd_aftertax_regular: D = D(0)
+    ytd_aftertax_bonus: D = D(0)
 
 
-# From: https://github.com/facebook/pyre-check/blob/master/pyre_extensions/__init__.py#L7-L8
-_T = TypeVar("_T")
+@dataclass
+class AnalyzedPaystub:
+    aggregate_limit: D = D(0)
+    deferral_limit: D = D(0)
+    paystubs_remaining: int = 0
+    prior_year_bonus: D = D(0)
+
+    base_wages: D = D(0)
+    pretax_employee: D = D(0)
+    pretax_match: D = D(0)
+    aftertax_employee: D = D(0)
+
+    over_paystub: Optional[int] = None
+
+    contrib_pretax_regular: D = D(0)
+    contrib_aftertax_regular: D = D(0)
+    match_pretax_regular: D = D(0)
 
 
-def none_throws(optional: Optional[_T], message: str = "Unexpected `None`") -> _T:
-    """Convert an optional to its value. Raises an `AssertionError` if the
-    value is `None`"""
-    if optional is None:
-        raise AssertionError(message)
-    return optional
+def read_config(path):
+    config = configparser.ConfigParser()
+    config.read(path)
+    dd(f"processed {path}")
+    return config
 
 
-class ParsedPath(NamedTuple):
-    basename: str
-    abspath: str
+def read_excel(path):
+    return pandas.read_excel(path)
 
 
-def parse_path(path) -> ParsedPath:
-    return ParsedPath(basename=os.path.basename(path), abspath=os.path.abspath(path))
+def normalize_xlsx(df) -> Paystub:
+    result = Paystub()
+    date_rownum = None
+    for rownum, ds in df.iterrows():
+        label, *cols = ds
+        label = label.lower()
+        if 'base wages for salary pay' in label:
+            result.cur_base_wages = D(cols[3])
+            result.ytd_base_wages = D(cols[4])
+        elif '401k deduction' in label:
+            result.cur_pretax_regular = D(cols[0])
+            result.ytd_pretax_regular = D(cols[1])
+        elif '401k bonus' in label:
+            result.ytd_pretax_bonus = D(cols[1])
+        elif '401k employer match' in label:
+            if 'apb' in label:
+                result.ytd_pretax_employer_apb_match = D(cols[1])
+            else:
+                result.ytd_pretax_employer_match = D(cols[1])
+        elif 'after tax base pay' in label:
+            result.cur_aftertax_regular = D(cols[0])
+            result.ytd_aftertax_regular = D(cols[1])
+        elif 'payslip information' in label:
+            date_rownum = rownum + 2
+        elif rownum == date_rownum:
+            result.paystub_date = datetime.strptime(cols[3], "%m/%d/%Y").date()
+    return result
 
 
-def worker(path) -> str:
-    ppath = parse_path(path)
-    return ppath.abspath if ARGS.verbose else ppath.basename
+def normalize_paystub_config(pc) -> Paystub:
+    def c(key, cast=D):
+        return cast(pc['paystub'][key])
+
+    result = Paystub()
+    result.paystub_date = c('paystub_date', lambda x: datetime.strptime(x, "%m/%d/%Y").date())
+
+    for field in "cur_base_wages ytd_base_wages cur_pretax_regular ytd_pretax_regular ytd_pretax_bonus ytd_pretax_employer_apb_match ytd_pretax_employer_match cur_aftertax_regular ytd_aftertax_regular".split():
+        setattr(result, field, c(field))
+
+    return result
 
 
-def main():
-    if ARGS.verbose:
-        print("verbose mode enabled, will display abspath")
-    for path in ARGS.paths:
-        print(worker(path))
+def calculate_paystubs_remaining(paystub_date: datetime.date) -> int:
+    paystubs = 24
+    paystubs -= 2 * (paystub_date.month - 1)
+    if paystub_date.day > 20:
+        paystubs -= 2
+    else:
+        paystubs -= 1
+    return paystubs
+
+
+@as_D
+def calculate_employee_limit(paystub_date: datetime.date) -> D:
+    return {
+        2021: 19_500,
+        2022: 20_500
+    }[paystub_date.year]
+
+
+@as_D
+def calculate_annual_limit(paystub_date: datetime.date) -> D:
+    return {
+        2021: 58_000,
+        2022: 61_000
+    }[paystub_date.year]
+
+
+@as_D
+def calculate_catchup_limit(paystub_date: datetime.date, eoy_age: int) -> D:
+    if eoy_age < 50:
+        return 0
+    return {
+        2021: 6500,
+        2022: 6500
+    }[paystub_date.year]
+
+
+def calculate_employer_match_limit(aggregate_limit: D) -> D:
+    """[...] an employer’s deduction for contributions to a defined
+    contribution plan (profit-sharing plan or money purchase pension plan)
+    cannot be more than 25% of the compensation paid (or accrued) during the
+    year to eligible employees participating in the plan (see Employer
+    Deduction in Publication 560, Retirement Plans for Small Business (SEP,
+    SIMPLE, and Qualified Plans). Reference: https://www.irs.gov/retirement-plans/plan-participant-employee/retirement-topics-401k-and-profit-sharing-plan-contribution-limits"""
+    return D(0.25) * aggregate_limit
+
+
+def derive(paystub: Paystub) -> AnalyzedPaystub:
+    a = AnalyzedPaystub()
+
+    a.paystubs_remaining = calculate_paystubs_remaining(paystub.paystub_date)
+    a.deferral_limit = calculate_employee_limit(paystub.paystub_date)
+    a.aggregate_limit = calculate_annual_limit(paystub.paystub_date)
+    a.employer_match_limit = calculate_employer_match_limit(a.aggregate_limit)
+    a.base_wages = paystub.ytd_base_wages
+
+    a.eoy_age = cfg('employee_age_on_december_31', cast=int)
+    a.catchup_limit = calculate_catchup_limit(paystub.paystub_date, a.eoy_age)
+    a.prior_year_bonus = cfg('prior_year_qpb_bonus') + cfg('prior_year_apb_bonus')
+    a.contribution_rate_pretax_bonus = cfg('contribution_rate_pretax_bonus')
+    a.contribution_rate_aftertax_bonus = cfg('contribution_rate_aftertax_bonus')
+
+    a.contrib_pretax_regular = paystub.cur_pretax_regular / paystub.cur_base_wages
+    a.match_pretax_regular = D(min(a.contrib_pretax_regular, 0.05))
+    a.contrib_aftertax_regular = paystub.cur_aftertax_regular / paystub.cur_base_wages
+
+    a.pretax_employee = paystub.ytd_pretax_regular + paystub.ytd_pretax_bonus
+    a.pretax_match = paystub.ytd_pretax_employer_match + paystub.ytd_pretax_employer_apb_match
+
+    a.aftertax_employee = paystub.ytd_aftertax_regular + paystub.ytd_aftertax_bonus
+
+    if paystub.paystub_date <= paystub.paystub_date.replace(month=10):
+        a.bonus_remaining = a.prior_year_bonus - paystub.ytd_apb_bonus - paystub.ytd_qpb_bonus
+        a.pretax_employee += a.bonus_remaining * a.contribution_rate_pretax_bonus
+        match_pretax_bonus = D(min(a.contribution_rate_pretax_bonus, 0.05))
+        a.pretax_match += a.bonus_remaining * match_pretax_bonus
+
+    return a
+
+
+def analyze(paystub: Paystub) -> AnalyzedPaystub:
+    a = derive(paystub)
+
+    for i in range(a.paystubs_remaining):
+        a.base_wages += paystub.cur_base_wages
+        if a.pretax_employee < a.deferral_limit:
+            a.pretax_employee += paystub.cur_pretax_regular
+            overage = a.pretax_employee - a.deferral_limit
+            if overage > 0:
+                a.over_paystub = i
+                a.pretax_employee -= overage
+            a.pretax_match += paystub.cur_base_wages * a.match_pretax_regular
+
+        # there is no automatic cutoff for aftertax
+        a.aftertax_employee += paystub.cur_aftertax_regular
+
+    return a
+
+
+def print_analysis(analysis: AnalyzedPaystub) -> None:
+    print(analysis)
+
+    def p(label, value):
+        print(f"\t{int(value):>10,}  {label:<40}")
+
+    def diff(value1, value2):
+        delta = value1 - value2
+        label = "(over contribution)" if delta < 0 else "(under contribution)" if delta > 0 else ""
+        p(f"Difference {label}", delta)
+
+    estact = "Actual" if analysis.paystubs_remaining == 0 else "Estimated"
+    print(f"{estact} End of Year Summary")
+
+    p("Aggregate limit (employer + employee)", analysis.aggregate_limit)
+    p(f"Catch up contribution limit (age {analysis.eoy_age})", analysis.catchup_limit)
+    print()
+
+    p("401k employee contribution (deferral) limit", analysis.deferral_limit)
+    p("401k employee contribution", analysis.pretax_employee)
+    diff(analysis.deferral_limit, analysis.pretax_employee)
+    print()
+
+    p("401k employer match limit", analysis.employer_match_limit)
+    p("401k employer match", analysis.pretax_match)
+    print()
+
+    after_tax_limit = analysis.aggregate_limit - analysis.pretax_employee - analysis.pretax_match
+    p("After-tax contribution limit", after_tax_limit)
+    p("After-tax contribution", analysis.aftertax_employee)
+    overage = analysis.aftertax_employee - after_tax_limit
+    if overage > 0:
+        p("After-tax over contribution", overage)
+    else:
+        p("After-tax under contribution", -overage)
+
+
+def passfail(label, testfn):
+    result = 'PASS' if testfn() else 'FAIL'
+    print(f"{result}  {label}")
+
+
+def print_checks(a: AnalyzedPaystub) -> None:
+    passfail('Maxed out employee pre-tax contribution', lambda: a.pretax_employee >= a.deferral_limit)
+    passfail('Avoided true-up by reaching employee limit in final paycheck', lambda: a.over_paystub is not None)
+    passfail('Maxed employer match by contributing at least 5% of eligible pay', lambda: a.pretax_employee / a.base_wages >= 0.05)
 
 
 if __name__ == '__main__':
