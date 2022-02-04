@@ -21,8 +21,9 @@ def parse_args():
 
 
 def main():
+    ARGS._config = read_config(ARGS.config)['general']
+
     for path in ARGS.paystubs:
-        ARGS._config = read_config(ARGS.config)['general']
         if path.endswith('.xlsx'):
             xlsx = read_excel(path)
             paystub = normalize_xlsx(xlsx)
