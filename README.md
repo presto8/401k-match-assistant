@@ -18,7 +18,7 @@ The script currently handles the following cases:
 
 Update employee.config and paystub.example. Then:
 
-   ./401k-match-assistant --config employee.config paystub.example
+    ./401k-match-assistant --config employee.config paystub.example
 
 Example output:
 
