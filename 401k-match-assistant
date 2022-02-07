@@ -14,29 +14,39 @@ from typing import Optional
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('paystubs', nargs='*', help='paystubs to process (either xlsx or config')
+    parser.add_argument('--paystub', required=True, help='paystub to process (either xlsx or config')
     parser.add_argument('--config', default="employee.config", help='config file containing employee information')
     parser.add_argument('--verbose', default=False, action='store_true', help='show more detailed messages')
+    parser.add_argument('values', nargs='*', help='set paystub values (overrides config and paystub file)')
     return parser.parse_args()
 
 
 def main():
     ARGS._config = read_config(ARGS.config)['general']
 
-    for path in ARGS.paystubs:
-        if path.endswith('.xlsx'):
-            xlsx = read_excel(path)
-            paystub = normalize_xlsx(xlsx)
-        else:
-            paystub_config = read_config(path)
-            paystub = normalize_paystub_config(paystub_config)
+    paystub = load_paystub(ARGS.paystub)
+    for value in ARGS.values:
+        key, _, val = value.partition('=')
+        setattr(paystub, key, D(val))
 
-        print(paystub)
-        analysis = analyze(paystub)
-        print()
-        print_analysis(analysis)
-        print()
-        print_checks(analysis)
+    validate_paystub(paystub)
+
+    print(paystub)
+    analysis = analyze(paystub)
+    print()
+    print_analysis(analysis)
+    print()
+    print_checks(analysis)
+
+
+def load_paystub(path):
+    if path.endswith('.xlsx'):
+        xlsx = read_excel(path)
+        paystub = normalize_xlsx(xlsx)
+    else:
+        paystub_config = read_config(path)
+        paystub = normalize_paystub_config(paystub_config)
+    return paystub
 
 
 def D(arg):
@@ -71,7 +81,7 @@ class Fail(Exception):
 class Paystub:
     paystub_date: Optional[datetime.date] = None
 
-    cur_base_wages: D = D(0)
+    cur_base_wages: Optional[D] = None
     ytd_base_wages: D = D(0)
     ytd_apb_bonus: D = D(0)
     ytd_qpb_bonus: D = D(0)
@@ -93,7 +103,6 @@ class AnalyzedPaystub:
     aggregate_limit: D = D(0)
     deferral_limit: D = D(0)
     paystubs_remaining: int = 0
-    prior_year_bonus: D = D(0)
 
     base_wages: D = D(0)
     pretax_employee: D = D(0)
@@ -127,6 +136,8 @@ def normalize_xlsx(df) -> Paystub:
         if 'base wages for salary pay' in label:
             result.cur_base_wages = D(cols[3])
             result.ytd_base_wages = D(cols[4])
+        elif 'annual performance bonus' in label:
+            result.ytd_apb_bonus = D(cols[4])
         elif '401k deduction' in label:
             result.cur_pretax_regular = D(cols[0])
             result.ytd_pretax_regular = D(cols[1])
@@ -140,10 +151,13 @@ def normalize_xlsx(df) -> Paystub:
         elif 'after tax base pay' in label:
             result.cur_aftertax_regular = D(cols[0])
             result.ytd_aftertax_regular = D(cols[1])
+        elif 'after tax bonus & commission' in label:
+            result.ytd_aftertax_bonus = D(cols[1])
         elif 'payslip information' in label:
             date_rownum = rownum + 2
         elif rownum == date_rownum:
             result.paystub_date = datetime.strptime(cols[3], "%m/%d/%Y").date()
+
     return result
 
 
@@ -158,6 +172,16 @@ def normalize_paystub_config(pc) -> Paystub:
         setattr(result, field, c(field))
 
     return result
+
+
+def validate_paystub(paystub: Paystub):
+    required_fields = "cur_base_wages cur_pretax_regular".split()
+    # required_fields = [x for x in dir(paystub) if not x.startswith('_')]
+    for key in required_fields:
+        try:
+            assert getattr(paystub, key) > D(0)
+        except (decimal.InvalidOperation, AssertionError):
+            raise Fail(f"required field missing: {key}")
 
 
 def calculate_paystubs_remaining(paystub_date: datetime.date) -> int:
@@ -206,6 +230,27 @@ def calculate_employer_match_limit(aggregate_limit: D) -> D:
     return D(0.25) * aggregate_limit
 
 
+def estimate_bonus_remaining(paystub) -> D:
+    # If paystub is after the last bonus date, there is no need for an estimate.
+    if paystub.paystub_date >= paystub.paystub_date.replace(month=10):
+        return D(0)
+
+    result = D(0)
+
+    # If APB bonus has not been paid yet, estimate it based on last year
+    if paystub.ytd_apb_bonus == D(0):
+        result += cfg('prior_year_apb_bonus')
+
+    # If YTD QPB bonus is less than 85% of last year's QPB bonus,
+    # assume that not all QPB bonus has been paid yet and include the
+    # difference in the estimate. Use 85% to account for potential loss of
+    # bonus.
+    if paystub.ytd_qpb_bonus < D(0.85) * cfg('prior_year_qpb_bonus'):
+        result += cfg('prior_year_qpb_bonus') - paystub.ytd_qpb_bonus
+
+    return result
+
+
 def derive(paystub: Paystub) -> AnalyzedPaystub:
     a = AnalyzedPaystub()
 
@@ -217,7 +262,6 @@ def derive(paystub: Paystub) -> AnalyzedPaystub:
 
     a.eoy_age = cfg('employee_age_on_december_31', cast=int)
     a.catchup_limit = calculate_catchup_limit(paystub.paystub_date, a.eoy_age)
-    a.prior_year_bonus = cfg('prior_year_qpb_bonus') + cfg('prior_year_apb_bonus')
     a.contribution_rate_pretax_bonus = cfg('contribution_rate_pretax_bonus')
     a.contribution_rate_aftertax_bonus = cfg('contribution_rate_aftertax_bonus')
 
@@ -230,11 +274,10 @@ def derive(paystub: Paystub) -> AnalyzedPaystub:
 
     a.aftertax_employee = paystub.ytd_aftertax_regular + paystub.ytd_aftertax_bonus
 
-    if paystub.paystub_date <= paystub.paystub_date.replace(month=10):
-        a.bonus_remaining = a.prior_year_bonus - paystub.ytd_apb_bonus - paystub.ytd_qpb_bonus
-        a.pretax_employee += a.bonus_remaining * a.contribution_rate_pretax_bonus
-        match_pretax_bonus = D(min(a.contribution_rate_pretax_bonus, 0.05))
-        a.pretax_match += a.bonus_remaining * match_pretax_bonus
+    a.bonus_remaining = estimate_bonus_remaining(paystub)
+    a.pretax_employee += a.bonus_remaining * a.contribution_rate_pretax_bonus
+    match_pretax_bonus = D(min(a.contribution_rate_pretax_bonus, 0.05))
+    a.pretax_match += a.bonus_remaining * match_pretax_bonus
 
     return a
 
@@ -242,6 +285,7 @@ def derive(paystub: Paystub) -> AnalyzedPaystub:
 def analyze(paystub: Paystub) -> AnalyzedPaystub:
     a = derive(paystub)
 
+    print(f"simulating {a.paystubs_remaining} paystubs")
     for i in range(a.paystubs_remaining):
         a.base_wages += paystub.cur_base_wages
         if a.pretax_employee < a.deferral_limit:
