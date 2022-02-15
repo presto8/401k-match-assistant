@@ -2,6 +2,7 @@
 
 import argparse
 import configparser
+import csv
 import decimal
 import inspect
 import pandas
@@ -43,6 +44,9 @@ def load_paystub(path):
     if path.endswith('.xlsx'):
         xlsx = read_excel(path)
         paystub = normalize_xlsx(xlsx)
+    elif path.endswith('.csv'):
+        csv = read_csv(path)
+        paystub = normalize_csv(csv)
     else:
         paystub_config = read_config(path)
         paystub = normalize_paystub_config(paystub_config)
@@ -127,6 +131,57 @@ def read_excel(path):
     return pandas.read_excel(path)
 
 
+def read_csv(path):
+    result = []
+    with open(path) as csvfile:
+        reader = csv.reader(csvfile)
+        result = list(reader)
+    return result
+
+
+@as_D
+def read_cell(cell) -> D:
+    if cell == "":
+        return "0"
+    return cell
+
+
+def normalize_csv(csv) -> Paystub:
+    result = Paystub()
+    date_rownum = None
+    for rownum, row in enumerate(csv):
+        label, *cols = row
+        label = label.lower()
+        if 'base wages for salary pay' in label:
+            result.cur_base_wages = D(cols[3])
+            result.ytd_base_wages = D(cols[4])
+        elif 'annual performance bonus' in label:
+            result.ytd_apb_bonus = D(cols[4])
+        elif 'quarterly performance bonus' in label:
+            result.ytd_qpb_bonus = D(cols[4])
+        elif '401k deduction' in label:
+            result.cur_pretax_regular = D(cols[0])
+            result.ytd_pretax_regular = D(cols[1])
+        elif '401k bonus' in label:
+            result.ytd_pretax_bonus = D(cols[1])
+        elif '401k employer match' in label:
+            if 'apb' in label:
+                result.ytd_pretax_employer_apb_match = D(cols[1])
+            else:
+                result.ytd_pretax_employer_match = D(cols[1])
+        elif 'after tax base pay' in label:
+            result.cur_aftertax_regular = read_cell(cols[0])
+            result.ytd_aftertax_regular = D(cols[1])
+        elif 'after tax bonus & commission' in label:
+            result.ytd_aftertax_bonus = D(cols[1])
+        elif 'payslip information' in label:
+            date_rownum = rownum + 2
+        elif rownum == date_rownum:
+            result.paystub_date = datetime.strptime(cols[3], "%m/%d/%Y").date()
+
+    return result
+
+
 def normalize_xlsx(df) -> Paystub:
     result = Paystub()
     date_rownum = None
@@ -138,6 +193,8 @@ def normalize_xlsx(df) -> Paystub:
             result.ytd_base_wages = D(cols[4])
         elif 'annual performance bonus' in label:
             result.ytd_apb_bonus = D(cols[4])
+        elif 'quarterly performance bonus' in label:
+            result.ytd_qpb_bonus = D(cols[4])
         elif '401k deduction' in label:
             result.cur_pretax_regular = D(cols[0])
             result.ytd_pretax_regular = D(cols[1])
