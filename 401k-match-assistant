@@ -9,6 +9,7 @@ import sys
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Optional
 
 
@@ -41,8 +42,8 @@ def main():
 
 def load_paystub(path):
     if path.endswith('.csv'):
-        csv = read_csv(path)
-        paystub = normalize_csv(csv)
+        csv_data = read_csv(path)
+        paystub = normalize_csv(csv_data)
     else:
         paystub_config = read_config(path)
         paystub = normalize_paystub_config(paystub_config)
@@ -81,39 +82,67 @@ class Fail(Exception):
 class Paystub:
     paystub_date: Optional[datetime.date] = None
 
-    cur_base_wages: Optional[D] = None
-    ytd_base_wages: D = D(0)
-    ytd_apb_bonus: D = D(0)
-    ytd_qpb_bonus: D = D(0)
+    cur_base_wages: Decimal = D(0)
+    ytd_base_wages: Decimal = D(0)
+    ytd_apb_bonus: Decimal = D(0)
+    ytd_qpb_bonus: Decimal = D(0)
 
-    cur_pretax_regular: D = D(0)
-    cur_aftertax_regular: D = D(0)
+    cur_pretax_regular: Decimal = D(0)
+    cur_aftertax_regular: Decimal = D(0)
 
-    ytd_pretax_regular: D = D(0)
-    ytd_pretax_bonus: D = D(0)
-    ytd_pretax_employer_match: D = D(0)
-    ytd_pretax_employer_apb_match: D = D(0)
+    ytd_pretax_regular: Decimal = D(0)
+    ytd_pretax_bonus: Decimal = D(0)
+    ytd_pretax_employer_match: Decimal = D(0)
+    ytd_pretax_employer_apb_match: Decimal = D(0)
 
-    ytd_aftertax_regular: D = D(0)
-    ytd_aftertax_bonus: D = D(0)
+    ytd_aftertax_regular: Decimal = D(0)
+    ytd_aftertax_bonus: Decimal = D(0)
 
 
 @dataclass
 class AnalyzedPaystub:
-    aggregate_limit: D = D(0)
-    deferral_limit: D = D(0)
+    aggregate_limit: Decimal = D(0)
+    deferral_limit: Decimal = D(0)
+    catchup_limit: Decimal = D(0)
+
+    age_adjusted_aggregate_limit: Decimal = D(0)
+    age_adjusted_deferral_limit: Decimal = D(0)
+
+    aftertax_limit: Decimal = D(0)
+
+    ytd_base_wages: Decimal = D(0)
+    ytd_pretax_employee: Decimal = D(0)
+    ytd_pretax_match: Decimal = D(0)
+    ytd_aftertax_employee: Decimal = D(0)
+
     paystubs_remaining: int = 0
 
-    base_wages: D = D(0)
-    pretax_employee: D = D(0)
-    pretax_match: D = D(0)
-    aftertax_employee: D = D(0)
+    est_remaining_base_wages: Decimal = D(0)
+    est_remaining_pretax_employee: Decimal = D(0)
+    est_remaining_pretax_match: Decimal = D(0)
+    est_remaining_aftertax_employee: Decimal = D(0)
+
+    base_wages: Decimal = D(0)
 
     over_paystub: Optional[int] = None
 
-    contrib_pretax_regular: D = D(0)
-    contrib_aftertax_regular: D = D(0)
-    match_pretax_regular: D = D(0)
+    contrib_pretax_regular: Decimal = D(0)
+    contrib_aftertax_regular: Decimal = D(0)
+    match_pretax_regular: Decimal = D(0)
+
+    eoy_age: int = 0
+
+    @property
+    def pretax_employee(self):
+        return self.ytd_pretax_employee + self.est_remaining_pretax_employee
+
+    @property
+    def pretax_match(self):
+        return self.ytd_pretax_match + self.est_remaining_pretax_match
+
+    @property
+    def aftertax_employee(self):
+        return self.ytd_aftertax_employee + self.est_remaining_aftertax_employee
 
 
 def read_config(path):
@@ -145,6 +174,7 @@ def normalize_csv(csv) -> Paystub:
         label, *cols = row
         label = label.lower()
         if 'base wages for salary pay' in label:
+            print(cols)
             result.cur_base_wages = D(cols[3])
             result.ytd_base_wages = D(cols[4])
         elif 'annual performance bonus' in label:
@@ -211,7 +241,9 @@ def calculate_paystubs_remaining(paystub_date: datetime.date) -> int:
 def calculate_employee_limit(paystub_date: datetime.date) -> D:
     return {
         2021: 19_500,
-        2022: 20_500
+        2022: 20_500,
+        2023: 22_500,
+        2024: 23_000,
     }[paystub_date.year]
 
 
@@ -219,7 +251,9 @@ def calculate_employee_limit(paystub_date: datetime.date) -> D:
 def calculate_annual_limit(paystub_date: datetime.date) -> D:
     return {
         2021: 58_000,
-        2022: 61_000
+        2022: 61_000,
+        2023: 66_000,
+        2024: 69_000,
     }[paystub_date.year]
 
 
@@ -229,7 +263,9 @@ def calculate_catchup_limit(paystub_date: datetime.date, eoy_age: int) -> D:
         return 0
     return {
         2021: 6500,
-        2022: 6500
+        2022: 6500,
+        2023: 7500,
+        2024: 7500,
     }[paystub_date.year]
 
 
@@ -243,7 +279,7 @@ def calculate_employer_match_limit(aggregate_limit: D) -> D:
     return D(0.25) * aggregate_limit
 
 
-def estimate_bonus_remaining(paystub) -> D:
+def estimate_bonus_remaining(paystub) -> Decimal:
     # If paystub is after the last bonus date, there is no need for an estimate.
     if paystub.paystub_date >= paystub.paystub_date.replace(month=10):
         return D(0)
@@ -270,27 +306,31 @@ def derive(paystub: Paystub) -> AnalyzedPaystub:
     a.paystubs_remaining = calculate_paystubs_remaining(paystub.paystub_date)
     a.deferral_limit = calculate_employee_limit(paystub.paystub_date)
     a.aggregate_limit = calculate_annual_limit(paystub.paystub_date)
-    a.employer_match_limit = calculate_employer_match_limit(a.aggregate_limit)
+    # a.employer_match_limit = calculate_employer_match_limit(a.aggregate_limit)
     a.base_wages = paystub.ytd_base_wages
 
     a.eoy_age = cfg('employee_age_on_december_31', cast=int)
     a.catchup_limit = calculate_catchup_limit(paystub.paystub_date, a.eoy_age)
-    a.contribution_rate_pretax_bonus = cfg('contribution_rate_pretax_bonus')
-    a.contribution_rate_aftertax_bonus = cfg('contribution_rate_aftertax_bonus')
+
+    a.age_adjusted_deferral_limit = a.deferral_limit + a.catchup_limit
+    a.age_adjusted_aggregate_limit = a.aggregate_limit + a.catchup_limit
+
+    contribution_rate_pretax_bonus = cfg('contribution_rate_pretax_bonus')
+    # contribution_rate_aftertax_bonus = cfg('contribution_rate_aftertax_bonus')
+    max_employer_match = cfg('max_employer_match', cast=float)
 
     a.contrib_pretax_regular = paystub.cur_pretax_regular / paystub.cur_base_wages
     a.match_pretax_regular = D(min(a.contrib_pretax_regular, 0.05))
     a.contrib_aftertax_regular = paystub.cur_aftertax_regular / paystub.cur_base_wages
 
-    a.pretax_employee = paystub.ytd_pretax_regular + paystub.ytd_pretax_bonus
-    a.pretax_match = paystub.ytd_pretax_employer_match + paystub.ytd_pretax_employer_apb_match
+    a.ytd_pretax_employee = paystub.ytd_pretax_regular + paystub.ytd_pretax_bonus
+    a.ytd_pretax_match = paystub.ytd_pretax_employer_match + paystub.ytd_pretax_employer_apb_match
+    a.ytd_aftertax_employee = paystub.ytd_aftertax_regular + paystub.ytd_aftertax_bonus
 
-    a.aftertax_employee = paystub.ytd_aftertax_regular + paystub.ytd_aftertax_bonus
-
-    a.bonus_remaining = estimate_bonus_remaining(paystub)
-    a.pretax_employee += a.bonus_remaining * a.contribution_rate_pretax_bonus
-    match_pretax_bonus = D(min(a.contribution_rate_pretax_bonus, 0.05))
-    a.pretax_match += a.bonus_remaining * match_pretax_bonus
+    bonus_remaining = estimate_bonus_remaining(paystub)
+    a.est_remaining_pretax_employee = bonus_remaining * contribution_rate_pretax_bonus
+    match_pretax_bonus = D(min(contribution_rate_pretax_bonus, max_employer_match))
+    a.est_remaining_pretax_match = bonus_remaining * match_pretax_bonus
 
     return a
 
@@ -298,19 +338,24 @@ def derive(paystub: Paystub) -> AnalyzedPaystub:
 def analyze(paystub: Paystub) -> AnalyzedPaystub:
     a = derive(paystub)
 
+    paystubs_ytd = 24 - a.paystubs_remaining
+
     print(f"simulating {a.paystubs_remaining} paystubs")
     for i in range(a.paystubs_remaining):
+        a.est_remaining_base_wages += paystub.cur_base_wages
         a.base_wages += paystub.cur_base_wages
-        if a.pretax_employee < a.deferral_limit:
-            a.pretax_employee += paystub.cur_pretax_regular
-            overage = a.pretax_employee - a.deferral_limit
+        if a.pretax_employee < a.age_adjusted_deferral_limit:
+            a.est_remaining_pretax_employee += paystub.cur_pretax_regular
+            overage = a.pretax_employee - a.age_adjusted_deferral_limit
             if overage > 0:
-                a.over_paystub = i
-                a.pretax_employee -= overage
-            a.pretax_match += paystub.cur_base_wages * a.match_pretax_regular
+                a.over_paystub = paystubs_ytd + i + 1
+                a.est_remaining_pretax_employee -= overage
+            a.est_remaining_pretax_match += paystub.cur_base_wages * a.match_pretax_regular
 
         # there is no automatic cutoff for aftertax
-        a.aftertax_employee += paystub.cur_aftertax_regular
+        a.est_remaining_aftertax_employee += paystub.cur_aftertax_regular
+
+    a.aftertax_limit = a.aggregate_limit + a.catchup_limit - a.pretax_employee - a.pretax_match
 
     return a
 
@@ -329,23 +374,37 @@ def print_analysis(analysis: AnalyzedPaystub) -> None:
     estact = "Actual" if analysis.paystubs_remaining == 0 else "Estimated"
     print(f"{estact} End of Year Summary")
 
-    p("Aggregate limit (employer + employee)", analysis.aggregate_limit)
-    p(f"Catch up contribution limit (age {analysis.eoy_age})", analysis.catchup_limit)
-    print()
+    print("\n\tLIMITS\n")
 
     p("401k employee contribution (deferral) limit", analysis.deferral_limit)
-    p("401k employee contribution", analysis.pretax_employee)
-    diff(analysis.deferral_limit, analysis.pretax_employee)
+    if analysis.catchup_limit > 0:
+        p("401k employee catch-up limit", analysis.catchup_limit)
+    p("AGE-ADJUSTED 401K EMPLOYEE CONTRIBUTION LIMIT", analysis.age_adjusted_deferral_limit)
     print()
 
-    p("401k employer match limit", analysis.employer_match_limit)
-    p("401k employer match", analysis.pretax_match)
+    p("Aggregate limit (employer + employee)", analysis.aggregate_limit)
+    p(f"Catch up contribution limit (age {analysis.eoy_age})", analysis.catchup_limit)
+    p("AGE-ADJUSTED AGGREGATE LIMIT (EMPLOYER + EMPLOYEE)", analysis.age_adjusted_aggregate_limit)
+
+    print("\n\tACTUAL\n")
+
+    p("AGE-ADJUSTED EMPLOYEE CONTRIBUTION (DEFERRAL) LIMIT", analysis.age_adjusted_deferral_limit)
+    p("401k employee contribution (actual YTD)", -analysis.ytd_pretax_employee)
+    p("401k employee contribution (est remaining)", -analysis.est_remaining_pretax_employee)
+    p("TOTAL 401K EMPLOYEE CONTRIBUTION", -analysis.pretax_employee)
+    diff(analysis.age_adjusted_deferral_limit, analysis.pretax_employee)
     print()
 
-    after_tax_limit = analysis.aggregate_limit - analysis.pretax_employee - analysis.pretax_match
-    p("After-tax contribution limit", after_tax_limit)
-    p("After-tax contribution", analysis.aftertax_employee)
-    overage = analysis.aftertax_employee - after_tax_limit
+    p("AGE-ADJUSTED AGGREGATE LIMIT (EMPLOYER + EMPLOYEE)", analysis.age_adjusted_aggregate_limit)
+    p("401k employee contribution", -analysis.pretax_employee)
+    p("401k employer match", -analysis.pretax_match)
+    p("REMAINING LIMIT", analysis.aftertax_limit)
+    print()
+
+    p("After-tax contribution limit", analysis.aftertax_limit)
+    p("After-tax contribution (actual YTD)", -analysis.ytd_aftertax_employee)
+    p("After-tax contribution (est remaining)", -analysis.est_remaining_aftertax_employee)
+    overage = analysis.aftertax_employee - analysis.aftertax_limit
     if overage > 0:
         p("After-tax over contribution", overage)
     else:
@@ -359,8 +418,11 @@ def passfail(label, testfn):
 
 def print_checks(a: AnalyzedPaystub) -> None:
     passfail('Maxed out employee pre-tax contribution', lambda: a.pretax_employee >= a.deferral_limit)
-    passfail('Avoided true-up by reaching employee limit in final paycheck', lambda: a.over_paystub is not None)
+    passfail(f'Avoided true-up by reaching employee limit in last 2 paychecks (#{a.over_paystub})', lambda: a.over_paystub >= 23)
     passfail('Maxed employer match by contributing at least 5% of eligible pay', lambda: a.pretax_employee / a.base_wages >= 0.05)
+
+    overage = a.aftertax_employee - a.aftertax_limit
+    passfail('Maxed out employee after-tax contribution', lambda: overage > 0)
 
 
 if __name__ == '__main__':
