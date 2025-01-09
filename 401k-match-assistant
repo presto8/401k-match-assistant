@@ -244,6 +244,7 @@ def calculate_employee_limit(paystub_date: datetime.date) -> D:
         2022: 20_500,
         2023: 22_500,
         2024: 23_000,
+        2025: 23_500,
     }[paystub_date.year]
 
 
@@ -254,6 +255,7 @@ def calculate_annual_limit(paystub_date: datetime.date) -> D:
         2022: 61_000,
         2023: 66_000,
         2024: 69_000,
+        2025: 70_000,
     }[paystub_date.year]
 
 
@@ -266,6 +268,7 @@ def calculate_catchup_limit(paystub_date: datetime.date, eoy_age: int) -> D:
         2022: 6500,
         2023: 7500,
         2024: 7500,
+        2025: 7500,
     }[paystub_date.year]
 
 
