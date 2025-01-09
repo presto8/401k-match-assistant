@@ -4,3 +4,5 @@ prior_year_apb_bonus = 20000
 prior_year_qpb_bonus = 5000
 contribution_rate_pretax_bonus = 0.05
 contribution_rate_aftertax_bonus = 0.10
+# set to the percentage match from the employer
+max_employer_match = 0.07

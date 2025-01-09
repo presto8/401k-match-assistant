@@ -131,6 +131,7 @@ class AnalyzedPaystub:
     match_pretax_regular: Decimal = D(0)
 
     eoy_age: int = 0
+    max_employer_match: Decimal = D(0)
 
     @property
     def pretax_employee(self):
@@ -320,7 +321,7 @@ def derive(paystub: Paystub) -> AnalyzedPaystub:
 
     contribution_rate_pretax_bonus = cfg('contribution_rate_pretax_bonus')
     # contribution_rate_aftertax_bonus = cfg('contribution_rate_aftertax_bonus')
-    max_employer_match = cfg('max_employer_match', cast=float)
+    a.max_employer_match = cfg('max_employer_match', cast=float)
 
     a.contrib_pretax_regular = paystub.cur_pretax_regular / paystub.cur_base_wages
     a.match_pretax_regular = D(min(a.contrib_pretax_regular, 0.05))
@@ -332,7 +333,7 @@ def derive(paystub: Paystub) -> AnalyzedPaystub:
 
     bonus_remaining = estimate_bonus_remaining(paystub)
     a.est_remaining_pretax_employee = bonus_remaining * contribution_rate_pretax_bonus
-    match_pretax_bonus = D(min(contribution_rate_pretax_bonus, max_employer_match))
+    match_pretax_bonus = D(min(contribution_rate_pretax_bonus, a.max_employer_match))
     a.est_remaining_pretax_match = bonus_remaining * match_pretax_bonus
 
     return a
@@ -422,7 +423,7 @@ def passfail(label, testfn):
 def print_checks(a: AnalyzedPaystub) -> None:
     passfail('Maxed out employee pre-tax contribution', lambda: a.pretax_employee >= a.deferral_limit)
     passfail(f'Avoided true-up by reaching employee limit in last 2 paychecks (#{a.over_paystub})', lambda: a.over_paystub >= 23)
-    passfail('Maxed employer match by contributing at least 5% of eligible pay', lambda: a.pretax_employee / a.base_wages >= 0.05)
+    passfail(f'Maxed employer match by contributing at least {a.max_employer_match}% of eligible pay', lambda: a.pretax_employee / a.base_wages >= 0.05)
 
     overage = a.aftertax_employee - a.aftertax_limit
     passfail('Maxed out employee after-tax contribution', lambda: overage > 0)
