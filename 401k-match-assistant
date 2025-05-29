@@ -183,7 +183,7 @@ def normalize_csv(csv) -> Paystub:
         elif 'quarterly performance bonus' in label:
             result.ytd_qpb_bonus = D(cols[4])
         elif '401k deduction' in label:
-            result.cur_pretax_regular = D(cols[0])
+            result.cur_pretax_regular = D(cols[0] or 0)
             result.ytd_pretax_regular = D(cols[1])
         elif '401k bonus' in label:
             result.ytd_pretax_bonus = D(cols[1])
