@@ -223,7 +223,7 @@ def validate_paystub(paystub: Paystub):
     # required_fields = [x for x in dir(paystub) if not x.startswith('_')]
     for key in required_fields:
         try:
-            assert getattr(paystub, key) > D(0)
+            assert getattr(paystub, key) >= D(0)
         except (decimal.InvalidOperation, AssertionError):
             raise Fail(f"required field missing: {key}")
 
